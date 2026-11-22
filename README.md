@@ -1,9 +1,3 @@
-
-
-## Stage 1:打通ROS2数据流
-先实现：
-EuRoC ROS2 bag 中 Image 和 IMU 数据的缓存和时间同步。
-打印每帧图像对应的 IMU 数量及时间范围。
 # my-VINS-Mono
 
 一个用于学习 VIO 的 ROS 2 增量实现。参考 VINS-Mono 的数据流重新实现核心模块，
