@@ -1,1 +1,8 @@
 .vscode*
+build/
+install/
+log/
+*.bag
+*.db3
+*.mcap
+__pycache__/
