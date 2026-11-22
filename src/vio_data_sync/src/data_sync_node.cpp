@@ -1,8 +1,10 @@
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -40,9 +42,23 @@ public:
 			image_qos,
 			std::bind(&DataSyncNode::image_callback, this, std::placeholders::_1)
 		);
+
+		process_thread_ = std::thread(&DataSyncNode::process_loop, this);
 	}
 
-	
+	~DataSyncNode() override
+	{
+		{
+			std::lock_guard<std::mutex> lock(buffer_mutex_);
+			running_ = false;
+		}
+
+		data_condition_.notify_all();
+
+		if (process_thread_.joinable()) {
+			process_thread_.join();
+		}
+	}
 
 private:
 	void imu_callback(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
@@ -62,10 +78,7 @@ private:
 			std::lock_guard<std::mutex> lock(buffer_mutex_);
 			imu_buffer_.push_back(msg);
 		}
-		
-
-		auto measurements = get_measurements();
-		log_measurements(measurements);
+		data_condition_.notify_one();
 	}
 
 	void image_callback(const sensor_msgs::msg::Image::ConstSharedPtr msg)
@@ -85,9 +98,8 @@ private:
 			std::lock_guard<std::mutex> lock(buffer_mutex_);
 			image_buffer_.push_back(msg);
 		}
-		
-		auto measurements = get_measurements();
-		log_measurements(measurements);
+		data_condition_.notify_one();
+
 	}
 
 	static std::int64_t get_timestamp_ns(const builtin_interfaces::msg::Time& stamp)
@@ -96,12 +108,22 @@ private:
 	}
 
 
-	std::vector<Measurement> get_measurements()
+	bool has_processable_data_locked() const
+	{
+		if (image_buffer_.empty() || imu_buffer_.empty())
+			return false;
+		const auto target_time = get_timestamp_ns(image_buffer_.front()->header.stamp);
+		const auto oldest_imu_time = get_timestamp_ns(imu_buffer_.front()->header.stamp);
+		const auto newest_imu_time = get_timestamp_ns(imu_buffer_.back()->header.stamp);
+
+		return newest_imu_time > target_time || oldest_imu_time >= target_time;
+	}
+
+	std::vector<Measurement> get_measurements_locked()
 	{
 		std::vector<Measurement> measurements;
-		std::lock_guard<std::mutex> lock(buffer_mutex_);
 
-		while(true) {
+		while (true) {
 			if (image_buffer_.empty() || imu_buffer_.empty())
 				break;
 
@@ -129,8 +151,7 @@ private:
 			measurement.image = image_buffer_.front();
 			image_buffer_.pop_front();
 
-			while(!imu_buffer_.empty() && 
-				get_timestamp_ns(imu_buffer_.front()->header.stamp) < target_time) {
+			while (get_timestamp_ns(imu_buffer_.front()->header.stamp) < target_time) {
 				measurement.imus.push_back(imu_buffer_.front());
 				imu_buffer_.pop_front();
 			}
@@ -159,7 +180,10 @@ private:
 			if (!bracketed) {
 				RCLCPP_ERROR_STREAM(
 					get_logger(),
-					"Invalid synchronized measurement: ..."
+					"Invalid synchronized measurement:"
+						<< " image=" << image_time
+						<< ", imu_range=[" << first_imu_time
+						<< ", " << last_imu_time << "]"
 				);
 				continue;
 			}
@@ -177,6 +201,29 @@ private:
 
 	}
 
+	void process_loop()
+	{
+		while (true) {
+			std::vector<Measurement> measurements;
+			{
+				std::unique_lock<std::mutex> lock(buffer_mutex_);
+
+				data_condition_.wait(
+					lock,
+					[this]() {
+						return !running_ || has_processable_data_locked();
+					}
+				);
+
+				if (!running_) {
+					break;
+				}
+				measurements = get_measurements_locked();
+			}
+			log_measurements(measurements);
+		}
+	}
+
 	rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscription_;
 	std::int64_t last_imu_timestamp_ns_{-1};
 
@@ -187,6 +234,9 @@ private:
 	std::deque<sensor_msgs::msg::Image::ConstSharedPtr> image_buffer_;
 	std::mutex buffer_mutex_;
 
+	std::condition_variable data_condition_;
+	std::thread process_thread_;
+	bool running_{true};
 };
 
 
