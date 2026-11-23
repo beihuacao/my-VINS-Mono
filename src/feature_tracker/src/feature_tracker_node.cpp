@@ -124,22 +124,27 @@ private:
 				}
 			}
 
+			assert(valid_previous_points.size() == valid_current_points.size());
 			assert(valid_current_points.size() == valid_feature_ids.size());
 			assert(valid_current_points.size() == valid_track_counts.size());
 
-			cv::Mat visualization_image;
+			const std::size_t tracked_count = valid_current_points.size();
+			cv::Mat visualization_image = draw_tracks(gray_image, valid_previous_points, valid_current_points, valid_track_counts);
 
-			if (valid_current_points.empty()) {
-				valid_current_points = detect_features(gray_image);
+			const cv::Mat feature_mask = create_feature_mask(gray_image, valid_current_points);
 
-				for (std::size_t i = 0; i < valid_current_points.size(); ++i) {
-					valid_feature_ids.push_back(next_feature_id_++);
-					valid_track_counts.push_back(1);
-				}
-				visualization_image = draw_features(gray_image, valid_current_points);
-			} else {
-				visualization_image = draw_tracks(gray_image, valid_previous_points, valid_current_points, valid_track_counts);
+			const int required_feature_count = std::max(0, kMaxFeatureCount - static_cast<int>(valid_current_points.size()));
+			const std::vector<cv::Point2f> new_points = detect_features(gray_image, required_feature_count, feature_mask);
+
+			for (const auto &point : new_points) {
+				valid_current_points.push_back(point);
+				valid_feature_ids.push_back(next_feature_id_++);
+				valid_track_counts.push_back(1);
+				cv::circle(visualization_image, point, 3, cv::Scalar(255, 0, 0), -1);
 			}
+
+			assert(valid_current_points.size() == valid_feature_ids.size());
+			assert(valid_current_points.size() == valid_track_counts.size());
 
 			previous_image_ = gray_image.clone();
 			previous_points_ = valid_current_points;
@@ -160,7 +165,9 @@ private:
 				get_logger(),
 				*get_clock(),
 				1000,
-				"Processed %zu points in %.3f ms",
+				"Tracked=%zu, added=%zu, total=%zu, time=%.3fms",
+				tracked_count,
+				new_points.size(),
 				valid_current_points.size(),
 				elapsed_ms);
 			
@@ -178,10 +185,14 @@ private:
     }   
 
 	std::vector<cv::Point2f> detect_features(
-		const cv::Mat &gray_image) const
+		const cv::Mat &gray_image, int max_feature_count, const cv::Mat &mask = cv::Mat()) const
 	{
 		std::vector<cv::Point2f> feature_points;
-		cv::goodFeaturesToTrack(gray_image, feature_points, kMaxFeatureCount, kQualityLevel, kMinFeatureDistance);
+
+		if (max_feature_count <= 0) {
+			return feature_points;
+		}
+		cv::goodFeaturesToTrack(gray_image, feature_points, max_feature_count, kQualityLevel, kMinFeatureDistance, mask);
 
 		return feature_points;
 	}
@@ -190,7 +201,7 @@ private:
 	{
 		cv::Mat visualization_image;
 		cv::cvtColor(gray_image, visualization_image, cv::COLOR_GRAY2BGR);
-		
+
 		for (const auto &point : feature_points) {
 			cv::circle(visualization_image, point, 3, cv::Scalar(255, 0, 0), -1);
 		}
@@ -226,7 +237,7 @@ private:
 
 	void initialize_features(const cv::Mat &gray_image)
 	{
-		previous_points_ = detect_features(gray_image);
+		previous_points_ = detect_features(gray_image, kMaxFeatureCount);
 
 		feature_ids_.clear();
 		track_counts_.clear();
@@ -238,6 +249,16 @@ private:
 
 	}
 
+	cv::Mat create_feature_mask(const cv::Mat &gray_image, const std::vector<cv::Point2f> &existing_points) const
+	{
+		cv::Mat mask(gray_image.rows, gray_image.cols, CV_8UC1, cv::Scalar(255));
+
+		for (const auto &point : existing_points) {
+			cv::circle(mask, point, static_cast<int>(kMinFeatureDistance), cv::Scalar(0), -1);
+		}
+
+		return mask;
+	}
 
 
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_subscription_;
