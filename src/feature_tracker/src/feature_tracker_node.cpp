@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cv_bridge/cv_bridge.hpp>
 #include <functional>
+#include <numeric>
 #include <opencv2/core/mat.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/video/tracking.hpp>
@@ -128,10 +129,22 @@ private:
 			assert(valid_current_points.size() == valid_feature_ids.size());
 			assert(valid_current_points.size() == valid_track_counts.size());
 
-			const std::size_t tracked_count = valid_current_points.size();
-			cv::Mat visualization_image = draw_tracks(gray_image, valid_previous_points, valid_current_points, valid_track_counts);
+			const std::size_t optical_flow_count =
+				valid_current_points.size();
 
-			const cv::Mat feature_mask = create_feature_mask(gray_image, valid_current_points);
+			const cv::Mat feature_mask = apply_feature_mask(
+				gray_image,
+				valid_previous_points,
+				valid_current_points,
+				valid_feature_ids,
+				valid_track_counts);
+
+			const std::size_t selected_count =
+				valid_current_points.size();
+
+			const std::size_t spatially_removed_count = optical_flow_count - selected_count;
+
+			cv::Mat visualization_image = draw_tracks(gray_image, valid_previous_points, valid_current_points, valid_track_counts);
 
 			const int required_feature_count = std::max(0, kMaxFeatureCount - static_cast<int>(valid_current_points.size()));
 			const std::vector<cv::Point2f> new_points = detect_features(gray_image, required_feature_count, feature_mask);
@@ -165,8 +178,9 @@ private:
 				get_logger(),
 				*get_clock(),
 				1000,
-				"Tracked=%zu, added=%zu, total=%zu, time=%.3fms",
-				tracked_count,
+				"LK=%zu, removed=%zu, added=%zu, total=%zu, time=%.3fms",
+				optical_flow_count,
+				spatially_removed_count,
 				new_points.size(),
 				valid_current_points.size(),
 				elapsed_ms);
@@ -257,6 +271,79 @@ private:
 			cv::circle(mask, point, static_cast<int>(kMinFeatureDistance), cv::Scalar(0), -1);
 		}
 
+		return mask;
+	}
+
+	cv::Mat apply_feature_mask(const cv::Mat &gray_image, std::vector<cv::Point2f> &previous_points,
+		std::vector<cv::Point2f> &current_points, std::vector<int> &feature_ids, std::vector<int> &track_counts) const
+	{
+		assert(previous_points.size() == current_points.size());
+		assert(current_points.size() == feature_ids.size());
+		assert(current_points.size() == track_counts.size());
+		
+		std::vector<std::size_t> indices(current_points.size());
+		
+		std::iota(indices.begin(), indices.end(), 0);
+
+		std::stable_sort(
+			indices.begin(),
+			indices.end(),
+			[&track_counts](std::size_t left, std::size_t right) {
+				return track_counts[left] > track_counts[right];
+			});
+		
+		cv::Mat mask(gray_image.rows, gray_image.cols, CV_8UC1, cv::Scalar(255));
+
+		std::vector<cv::Point2f> selected_previous_points;
+		std::vector<cv::Point2f> selected_current_points;
+		std::vector<int> selected_feature_ids;
+		std::vector<int> selected_track_counts;
+
+		selected_previous_points.reserve(previous_points.size());
+		selected_current_points.reserve(current_points.size());
+		selected_feature_ids.reserve(feature_ids.size());
+		selected_track_counts.reserve(track_counts.size());
+
+		for (const std::size_t index : indices) {
+			const cv::Point2f &point = current_points[index];
+
+			const int x = static_cast<int>(point.x);
+			const int y = static_cast<int>(point.y);
+
+			assert(x >= 0 && x < mask.cols);
+			assert(y >= 0 && y < mask.rows);
+
+			if (mask.at<unsigned char>(y, x) == 0) {
+				continue;
+			}
+
+			selected_previous_points.push_back(
+				previous_points[index]);
+
+			selected_current_points.push_back(
+				current_points[index]);
+
+			selected_feature_ids.push_back(
+				feature_ids[index]);
+
+			selected_track_counts.push_back(
+				track_counts[index]);
+
+			cv::circle(
+				mask,
+				point,
+				static_cast<int>(kMinFeatureDistance),
+				cv::Scalar(0),
+				-1);
+		}
+
+		
+
+		previous_points.swap(selected_previous_points);
+		current_points.swap(selected_current_points);
+		feature_ids.swap(selected_feature_ids);
+		track_counts.swap(selected_track_counts);
+	
 		return mask;
 	}
 
