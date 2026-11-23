@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <cv_bridge/cv_bridge.hpp>
@@ -52,7 +54,7 @@ private:
 			const auto cv_image = cv_bridge::toCvShare(
 				message,
 				sensor_msgs::image_encodings::MONO8);
-
+			
         	const cv::Mat &gray_image = cv_image->image;
 
 			++received_image_count_;
@@ -69,6 +71,8 @@ private:
 
 				previous_image_.release();
 				previous_points_.clear();
+				feature_ids_.clear();
+				track_counts_.clear();
 			}
 			previous_timestamp_ns_ = current_timestamp_ns;
 
@@ -76,7 +80,7 @@ private:
 			const auto start_time = std::chrono::steady_clock::now();
 
 			if (previous_image_.empty()) {
-				previous_points_ = detect_features(gray_image);
+				initialize_features(gray_image);
 				previous_image_ = gray_image.clone();
 
 				const cv::Mat visualization_image = draw_features(gray_image, previous_points_);
@@ -93,6 +97,9 @@ private:
 			std::vector<unsigned char> status;
 			std::vector<float> errors;
 
+			assert(previous_points_.size() == feature_ids_.size());
+			assert(previous_points_.size() == track_counts_.size());
+
 			cv::calcOpticalFlowPyrLK(
 				previous_image_,
 				gray_image,
@@ -104,25 +111,40 @@ private:
 
 			std::vector<cv::Point2f> valid_current_points;
 			std::vector<cv::Point2f> valid_previous_points;
+			std::vector<int> valid_feature_ids;
+			std::vector<int> valid_track_counts;
 
 			for (std::size_t i = 0; i < current_points.size(); ++i) {
 				if (status[i] && is_inside_image(current_points[i], gray_image)) {
 					valid_current_points.push_back(current_points[i]);
 					valid_previous_points.push_back(previous_points_[i]);
+
+					valid_feature_ids.push_back(feature_ids_[i]);
+					valid_track_counts.push_back(track_counts_[i] + 1);
 				}
 			}
+
+			assert(valid_current_points.size() == valid_feature_ids.size());
+			assert(valid_current_points.size() == valid_track_counts.size());
 
 			cv::Mat visualization_image;
 
 			if (valid_current_points.empty()) {
 				valid_current_points = detect_features(gray_image);
+
+				for (std::size_t i = 0; i < valid_current_points.size(); ++i) {
+					valid_feature_ids.push_back(next_feature_id_++);
+					valid_track_counts.push_back(1);
+				}
 				visualization_image = draw_features(gray_image, valid_current_points);
 			} else {
-				visualization_image = draw_tracks(gray_image, valid_previous_points, valid_current_points);
+				visualization_image = draw_tracks(gray_image, valid_previous_points, valid_current_points, valid_track_counts);
 			}
 
 			previous_image_ = gray_image.clone();
 			previous_points_ = valid_current_points;
+			feature_ids_ = valid_feature_ids;
+			track_counts_ = valid_track_counts;
 
 			auto visualization_message = cv_bridge::CvImage(
 				message->header,
@@ -168,21 +190,27 @@ private:
 	{
 		cv::Mat visualization_image;
 		cv::cvtColor(gray_image, visualization_image, cv::COLOR_GRAY2BGR);
+		
 		for (const auto &point : feature_points) {
-			cv::circle(visualization_image, point, 3, cv::Scalar(0, 0, 255), -1);
+			cv::circle(visualization_image, point, 3, cv::Scalar(255, 0, 0), -1);
 		}
 
 		return visualization_image;
 	}
 
-	cv::Mat draw_tracks(const cv::Mat &gray_image, 
-		const std::vector<cv::Point2f> &previous_points, const std::vector<cv::Point2f> &current_points) const
+	cv::Mat draw_tracks(const cv::Mat &gray_image, const std::vector<cv::Point2f> &previous_points, 
+		const std::vector<cv::Point2f> &current_points, const std::vector<int> &track_counts) const
 	{
+		assert(previous_points.size() == current_points.size());
+		assert(current_points.size() == track_counts.size());
+
 		cv::Mat visualization_image;
 		cv::cvtColor(gray_image, visualization_image, cv::COLOR_GRAY2BGR);
 		for (std::size_t i = 0; i < current_points.size(); ++i) {
+			const float ratio = std::min(1.0F, static_cast<float>(track_counts[i]) / 20.0F);
+			const cv::Scalar color(255.0 * (1.0F - ratio), 0.0, 255.0 * ratio);
 			cv::line(visualization_image, previous_points[i], current_points[i], cv::Scalar(0, 255, 0), 1);
-			cv::circle(visualization_image, current_points[i], 3, cv::Scalar(0, 0, 255), -1);
+			cv::circle(visualization_image, current_points[i], 3, color, -1);
 		}
 
 		return visualization_image;
@@ -194,6 +222,20 @@ private:
 			point.y >= 1.0F &&
 			point.x < static_cast<float>(image.cols - 1) &&
 			point.y < static_cast<float>(image.rows - 1);
+	}
+
+	void initialize_features(const cv::Mat &gray_image)
+	{
+		previous_points_ = detect_features(gray_image);
+
+		feature_ids_.clear();
+		track_counts_.clear();
+
+		for (std::size_t i = 0; i < previous_points_.size(); ++i) {
+			feature_ids_.push_back(next_feature_id_++);
+			track_counts_.push_back(1);
+		}
+
 	}
 
 
@@ -211,6 +253,11 @@ private:
 
 	cv::Mat previous_image_;
 	std::vector<cv::Point2f> previous_points_;
+
+	std::vector<int> feature_ids_;
+	std::vector<int> track_counts_;
+
+	int next_feature_id_ = 0;
 
 };
 
