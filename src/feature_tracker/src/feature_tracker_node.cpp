@@ -4,6 +4,7 @@
 #include <functional>
 #include <opencv2/core/mat.hpp>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/video/tracking.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/image_encodings.hpp>
 #include <sensor_msgs/msg/image.hpp>
@@ -47,12 +48,12 @@ public:
 private:
     void image_callback(const sensor_msgs::msg::Image::ConstSharedPtr &message)
     {
-		try{
+		try {
 			const auto cv_image = cv_bridge::toCvShare(
 				message,
 				sensor_msgs::image_encodings::MONO8);
 
-        	const cv::Mat& gray_image = cv_image->image;
+        	const cv::Mat &gray_image = cv_image->image;
 
 			++received_image_count_;
 			const std::int64_t current_timestamp_ns = rclcpp::Time(message->header.stamp).nanoseconds();
@@ -63,13 +64,66 @@ private:
 						get_logger(), "Large image interval: %.6f s", interval);
 				}
 			}
+			if (previous_timestamp_ns_ >= 0 && current_timestamp_ns <= previous_timestamp_ns_) {
+				RCLCPP_WARN(get_logger(), "Image timestamp is not strictly increasing");
+
+				previous_image_.release();
+				previous_points_.clear();
+			}
 			previous_timestamp_ns_ = current_timestamp_ns;
 
 			
 			const auto start_time = std::chrono::steady_clock::now();
-			const auto feature_points = detect_features(gray_image);
-			
-			const cv::Mat visualization_image = draw_features(gray_image, feature_points);
+
+			if (previous_image_.empty()) {
+				previous_points_ = detect_features(gray_image);
+				previous_image_ = gray_image.clone();
+
+				const cv::Mat visualization_image = draw_features(gray_image, previous_points_);
+				auto visualization_message = cv_bridge::CvImage(
+					message->header,
+					sensor_msgs::image_encodings::BGR8,
+					visualization_image).toImageMsg();
+
+				visualization_publisher_->publish(*visualization_message);
+				return;
+			}
+
+			std::vector<cv::Point2f> current_points;
+			std::vector<unsigned char> status;
+			std::vector<float> errors;
+
+			cv::calcOpticalFlowPyrLK(
+				previous_image_,
+				gray_image,
+				previous_points_,
+				current_points,
+				status,
+				errors
+			);
+
+			std::vector<cv::Point2f> valid_current_points;
+			std::vector<cv::Point2f> valid_previous_points;
+
+			for (std::size_t i = 0; i < current_points.size(); ++i) {
+				if (status[i] && is_inside_image(current_points[i], gray_image)) {
+					valid_current_points.push_back(current_points[i]);
+					valid_previous_points.push_back(previous_points_[i]);
+				}
+			}
+
+			cv::Mat visualization_image;
+
+			if (valid_current_points.empty()) {
+				valid_current_points = detect_features(gray_image);
+				visualization_image = draw_features(gray_image, valid_current_points);
+			} else {
+				visualization_image = draw_tracks(gray_image, valid_previous_points, valid_current_points);
+			}
+
+			previous_image_ = gray_image.clone();
+			previous_points_ = valid_current_points;
+
 			auto visualization_message = cv_bridge::CvImage(
 				message->header,
 				sensor_msgs::image_encodings::BGR8,
@@ -85,7 +139,7 @@ private:
 				*get_clock(),
 				1000,
 				"Processed %zu points in %.3f ms",
-				feature_points.size(),
+				valid_current_points.size(),
 				elapsed_ms);
 			
 
@@ -121,6 +175,29 @@ private:
 		return visualization_image;
 	}
 
+	cv::Mat draw_tracks(const cv::Mat &gray_image, 
+		const std::vector<cv::Point2f> &previous_points, const std::vector<cv::Point2f> &current_points) const
+	{
+		cv::Mat visualization_image;
+		cv::cvtColor(gray_image, visualization_image, cv::COLOR_GRAY2BGR);
+		for (std::size_t i = 0; i < current_points.size(); ++i) {
+			cv::line(visualization_image, previous_points[i], current_points[i], cv::Scalar(0, 255, 0), 1);
+			cv::circle(visualization_image, current_points[i], 3, cv::Scalar(0, 0, 255), -1);
+		}
+
+		return visualization_image;
+	}
+
+	bool is_inside_image(const cv::Point2f &point, const cv::Mat &image) const
+	{
+		return point.x >= 1.0F &&
+			point.y >= 1.0F &&
+			point.x < static_cast<float>(image.cols - 1) &&
+			point.y < static_cast<float>(image.rows - 1);
+	}
+
+
+
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_subscription_;
 
 	static constexpr int kMaxFeatureCount = 150;
@@ -131,6 +208,9 @@ private:
 	std::int64_t previous_timestamp_ns_ = -1;
 
 	rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr visualization_publisher_;
+
+	cv::Mat previous_image_;
+	std::vector<cv::Point2f> previous_points_;
 
 };
 
