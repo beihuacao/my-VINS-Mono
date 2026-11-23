@@ -84,13 +84,13 @@ python3 -m venv /tmp/my_vins_rosbags_venv
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-ros2 bag play /tmp/MH_01_easy_ros2
+ros2 bag play ~/projects/VINS-Mono-project/my-VINS-Mono/MH_01_easy_ros2
 ```
 
 只播放前5秒进行快速检查：
 
 ```bash
-ros2 bag play /tmp/MH_01_easy_ros2 \
+ros2 bag play ~/projects/VINS-Mono-project/my-VINS-Mono/MH_01_easy_ros2 \
   --playback-duration 5 \
   --rate 2.0
 ```
